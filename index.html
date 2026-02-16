@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Seattle Parking Availability MVP</title>
+    <link
+      rel="stylesheet"
+      href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"
+      integrity="sha256-p4NxAoJBhIIN+hmNHrzRCf9tD/miZyoHS5obTRR9BMY="
+      crossorigin=""
+    />
+    <link rel="stylesheet" href="styles.css" />
+  </head>
+  <body>
+    <main class="layout">
+      <section class="panel">
+        <h1>Seattle Parking Availability</h1>
+        <p class="subtitle">MVP using local file: <code>data/hiyf-7edq-latest-60-min.json</code></p>
+
+        <div class="control-group">
+          <label for="addressSearch">Address / Street Search</label>
+          <div class="inline-controls">
+            <input
+              id="addressSearch"
+              type="text"
+              placeholder="Example: MERCER ST or BROADWAY"
+            />
+            <button id="clearSearchBtn" type="button" class="secondary">Clear</button>
+          </div>
+        </div>
+
+        <div class="control-group">
+          <label for="timeSelect">Time Filter</label>
+          <select id="timeSelect">
+            <option value="latest">Latest per blockface</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label for="minAvailability">Minimum Availability</label>
+          <div class="slider-wrap">
+            <input id="minAvailability" type="range" min="0" max="100" value="0" step="5" />
+            <span id="minAvailabilityValue">0%</span>
+          </div>
+        </div>
+
+        <button id="refreshBtn" type="button">Reload Local Data</button>
+
+        <dl class="stats" id="statsPanel">
+          <div>
+            <dt>Visible Blockfaces</dt>
+            <dd id="statBlockfaces">-</dd>
+          </div>
+          <div>
+            <dt>Average Occupancy</dt>
+            <dd id="statAvgOcc">-</dd>
+          </div>
+          <div>
+            <dt>Average Availability</dt>
+            <dd id="statAvgAvail">-</dd>
+          </div>
+          <div>
+            <dt>Data Time Window</dt>
+            <dd id="statWindow">-</dd>
+          </div>
+        </dl>
+
+        <div class="legend">
+          <h2>Availability Legend</h2>
+          <p><span class="dot dot-high"></span> High (60-100%)</p>
+          <p><span class="dot dot-med"></span> Medium (30-59%)</p>
+          <p><span class="dot dot-low"></span> Low (0-29%)</p>
+        </div>
+
+        <p id="status" class="status">Loading local file...</p>
+      </section>
+
+      <section class="map-wrap">
+        <div id="map" aria-label="Seattle paid parking availability map"></div>
+      </section>
+    </main>
+
+    <script
+      src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"
+      integrity="sha256-20nQCchB9co0qIjJZRGuk2/Z9VM+kNiyxNV1lvTlZBo="
+      crossorigin=""
+    ></script>
+    <script src="app.js"></script>
+  </body>
+</html>
