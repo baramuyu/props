@@ -36,7 +36,7 @@ No build step required.
 
 ```bash
 cd /Users/bensteineman/YukisProject
-python3 -m http.server 8080
+ruby -run -e httpd . -p 8080
 ```
 
 Open:

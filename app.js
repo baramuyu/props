@@ -24,6 +24,7 @@ const statWindow = document.getElementById("statWindow");
 
 let allRows = [];
 let timeValues = [];
+let hasFitOnce = false;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -54,6 +55,23 @@ function formatLocalTime(ms) {
     return "Unknown";
   }
   return new Date(ms).toLocaleString();
+}
+
+function escapeHtml(value) {
+  return String(value)
+    .replaceAll("&", "&amp;")
+    .replaceAll("<", "&lt;")
+    .replaceAll(">", "&gt;")
+    .replaceAll('"', "&quot;")
+    .replaceAll("'", "&#39;");
+}
+
+function normalizeText(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
 function normalizeRow(row) {
@@ -136,7 +154,7 @@ function aggregateByLatest(rows) {
 function filteredPoints() {
   const selectedTime = timeSelect.value;
   const minAvail = Number(minAvailability.value);
-  const query = addressSearch.value.trim().toLowerCase();
+  const query = normalizeText(addressSearch.value);
 
   let points = [];
   if (selectedTime === "latest") {
@@ -149,7 +167,9 @@ function filteredPoints() {
 
   if (query) {
     points = points.filter((row) => {
-      const haystack = `${row.blockfaceName} ${row.paidParkingArea} ${row.paidParkingSubarea}`.toLowerCase();
+      const haystack = normalizeText(
+        `${row.blockfaceName} ${row.paidParkingArea} ${row.paidParkingSubarea}`
+      );
       return haystack.includes(query);
     });
   }
@@ -173,7 +193,8 @@ function updateStats(points) {
   statAvgAvail.textContent = `${availAvg.toFixed(1)}%`;
 }
 
-function render() {
+function render(options = {}) {
+  const shouldFitMap = options.fitMap ?? false;
   const points = filteredPoints();
   markerLayer.clearLayers();
 
@@ -187,11 +208,11 @@ function render() {
     });
 
     marker.bindPopup(`
-      <div class="popup-title">${point.blockfaceName}</div>
+      <div class="popup-title">${escapeHtml(point.blockfaceName)}</div>
       <div>Observed: ${formatLocalTime(point.observedAtMs)}</div>
-      <div>Side: ${point.sideOfStreet || "Unknown"}</div>
-      <div>Area: ${point.paidParkingArea}${point.paidParkingSubarea ? ` (${point.paidParkingSubarea})` : ""}</div>
-      <div>Category: ${point.parkingCategory}</div>
+      <div>Side: ${escapeHtml(point.sideOfStreet || "Unknown")}</div>
+      <div>Area: ${escapeHtml(point.paidParkingArea)}${point.paidParkingSubarea ? ` (${escapeHtml(point.paidParkingSubarea)})` : ""}</div>
+      <div>Category: ${escapeHtml(point.parkingCategory)}</div>
       <div>Occupied: ${point.occupiedSpaces}</div>
       <div>Total Spaces: ${point.totalSpaces}</div>
       <div>Available Spaces: ${point.availableSpaces}</div>
@@ -209,8 +230,12 @@ function render() {
     return;
   }
 
-  const bounds = L.latLngBounds(points.map((p) => [p.latitude, p.longitude]));
-  map.fitBounds(bounds.pad(0.1));
+  if (shouldFitMap || !hasFitOnce) {
+    const bounds = L.latLngBounds(points.map((p) => [p.latitude, p.longitude]));
+    map.fitBounds(bounds.pad(0.1));
+    hasFitOnce = true;
+  }
+
   setStatus(`Showing ${points.length.toLocaleString()} blockfaces.`);
 }
 
@@ -247,7 +272,7 @@ async function loadLocalData() {
 
     buildTimeOptions(allRows);
     updateWindowStat();
-    render();
+    render({ fitMap: true });
   } catch (err) {
     markerLayer.clearLayers();
     statBlockfaces.textContent = "-";
@@ -263,12 +288,12 @@ async function loadLocalData() {
 addressSearch.addEventListener("input", render);
 clearSearchBtn.addEventListener("click", () => {
   addressSearch.value = "";
-  render();
+  render({ fitMap: true });
 });
-timeSelect.addEventListener("change", render);
+timeSelect.addEventListener("change", () => render({ fitMap: true }));
 minAvailability.addEventListener("input", () => {
   minAvailabilityValue.textContent = `${minAvailability.value}%`;
-  render();
+  render({ fitMap: false });
 });
 refreshBtn.addEventListener("click", loadLocalData);
 
