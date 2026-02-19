@@ -1,0 +1,5 @@
+start_ts=2026-02-17T08:00:00.000
+max_ts=2026-02-17T21:59:00.000
+expected_rows=997432
+limit=50000
+chunk_files=20

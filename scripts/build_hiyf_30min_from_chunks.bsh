@@ -1,0 +1,69 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+CHUNK_DIR="$ROOT_DIR/data/chunks/hiyf-7edq-24h"
+OUT_WITH_STATS="$ROOT_DIR/data/hiyf-7edq-latest-24h-30min-with-stats.json"
+OUT_REDUCED="$ROOT_DIR/data/hiyf-7edq-latest-24h-30min.json"
+TMPDIR="$(mktemp -d /tmp/hiyf_reduce_XXXXXX)"
+
+cleanup() {
+  rm -rf "$TMPDIR"
+}
+trap cleanup EXIT
+
+count_rows_in_file() {
+  local pattern="$1"
+  local file="$2"
+  if command -v rg >/dev/null 2>&1; then
+    rg -o "$pattern" "$file" | wc -l | tr -d ' '
+  else
+    grep -o "$pattern" "$file" | wc -l | tr -d ' '
+  fi
+}
+
+if [ ! -d "$CHUNK_DIR" ]; then
+  echo "error: chunk dir not found: $CHUNK_DIR" >&2
+  exit 1
+fi
+
+shopt -s nullglob
+chunk_files=("$CHUNK_DIR"/chunk_*.json)
+shopt -u nullglob
+if [ "${#chunk_files[@]}" -eq 0 ]; then
+  echo "error: no chunk files found in $CHUNK_DIR" >&2
+  exit 1
+fi
+
+echo "step=1 aggregate each chunk"
+agg_files=()
+i=0
+for chunk in "${chunk_files[@]}"; do
+  i=$((i + 1))
+  ndjson="$TMPDIR/chunk_${i}.ndjson"
+  agg="$TMPDIR/agg_${i}.json"
+
+  jq -c '.[]' "$chunk" > "$ndjson"
+  ruby "$ROOT_DIR/scripts/aggregate_hiyf_ndjson_chunk.rb" "$ndjson" "$agg"
+  agg_files+=("$agg")
+  echo "chunk_aggregated=$i file=$(basename "$chunk")"
+done
+
+echo "step=2 merge chunk aggregates with minute stats"
+ruby "$ROOT_DIR/scripts/merge_hiyf_chunk_aggs.rb" "$OUT_WITH_STATS" "${agg_files[@]}"
+
+echo "step=3 write reduced-only 30-min file"
+jq '[ .[] | del(.minute_stats) ]' "$OUT_WITH_STATS" > "$OUT_REDUCED"
+
+rows_with_stats=$(count_rows_in_file '"bucketstartdatetime"' "$OUT_WITH_STATS")
+size_with_stats_mb=$(wc -c < "$OUT_WITH_STATS" | awk '{printf "%.2f", $1/1024/1024}')
+rows_reduced=$(count_rows_in_file '"bucketstartdatetime"' "$OUT_REDUCED")
+size_reduced_mb=$(wc -c < "$OUT_REDUCED" | awk '{printf "%.2f", $1/1024/1024}')
+
+echo "done"
+echo "with_stats=$OUT_WITH_STATS"
+echo "with_stats_rows=$rows_with_stats"
+echo "with_stats_mb=$size_with_stats_mb"
+echo "reduced=$OUT_REDUCED"
+echo "reduced_rows=$rows_reduced"
+echo "reduced_mb=$size_reduced_mb"

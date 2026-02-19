@@ -1,0 +1,149 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+ROOT_DIR="$(cd "$(dirname "$0")/.." && pwd)"
+OUTDIR="$ROOT_DIR/data/chunks/hiyf-7edq-24h"
+MANIFEST="$OUTDIR/manifest.txt"
+LIMIT=50000
+FORCE_REFRESH=0
+RESUME_ONLY=0
+
+for arg in "$@"; do
+  case "$arg" in
+    --refresh)
+      FORCE_REFRESH=1
+      ;;
+    --resume-only)
+      RESUME_ONLY=1
+      ;;
+    *)
+      echo "error: unknown arg $arg" >&2
+      echo "usage: bash scripts/download_hiyf_24h_chunks.bsh [--resume-only] [--refresh]" >&2
+      exit 1
+      ;;
+  esac
+done
+
+mkdir -p "$OUTDIR"
+
+count_rows_in_file() {
+  local file="$1"
+  if command -v rg >/dev/null 2>&1; then
+    rg -o '"occupancydatetime"' "$file" | wc -l | tr -d ' '
+  else
+    grep -o '"occupancydatetime"' "$file" | wc -l | tr -d ' '
+  fi
+}
+
+have_manifest=0
+if [ -f "$MANIFEST" ]; then
+  have_manifest=1
+fi
+
+if [ "$RESUME_ONLY" -eq 1 ]; then
+  if [ "$have_manifest" -ne 1 ]; then
+    echo "step=1 bootstrap manifest from existing chunk files"
+    shopt -s nullglob
+    existing_chunks=("$OUTDIR"/chunk_*.json)
+    shopt -u nullglob
+    if [ "${#existing_chunks[@]}" -eq 0 ]; then
+      echo "error: --resume-only requires existing chunks or manifest" >&2
+      exit 1
+    fi
+
+    first_chunk=$(printf "%s\n" "${existing_chunks[@]}" | sort | head -n1)
+    last_chunk=$(printf "%s\n" "${existing_chunks[@]}" | sort | tail -n1)
+    start_ts=$(jq -r '.[0].occupancydatetime // empty' "$first_chunk")
+    max_ts=$(jq -r '.[-1].occupancydatetime // empty' "$last_chunk")
+    count=0
+    for f in "${existing_chunks[@]}"; do
+      c=$(count_rows_in_file "$f")
+      count=$((count + c))
+    done
+
+    {
+      echo "start_ts=$start_ts"
+      echo "max_ts=$max_ts"
+      echo "expected_rows=$count"
+      echo "limit=$LIMIT"
+      echo "chunk_files=${#existing_chunks[@]}"
+    } > "$MANIFEST"
+    have_manifest=1
+  fi
+  echo "step=1 resume-only using manifest"
+  start_ts=$(grep '^start_ts=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  max_ts=$(grep '^max_ts=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  count=$(grep '^expected_rows=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  limit_from_manifest=$(grep '^limit=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  if [ -n "${limit_from_manifest:-}" ]; then
+    LIMIT="$limit_from_manifest"
+  fi
+elif [ "$FORCE_REFRESH" -eq 0 ] && [ "$have_manifest" -eq 1 ]; then
+  echo "step=1 reuse existing manifest"
+  start_ts=$(grep '^start_ts=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  max_ts=$(grep '^max_ts=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  count=$(grep '^expected_rows=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  limit_from_manifest=$(grep '^limit=' "$MANIFEST" | head -n1 | cut -d= -f2-)
+  if [ -n "${limit_from_manifest:-}" ]; then
+    LIMIT="$limit_from_manifest"
+  fi
+else
+  echo "step=1 resolve window and total count"
+  max_ts=$(curl -s --get 'https://cos-data.seattle.gov/resource/hiyf-7edq.json' \
+    --data-urlencode '$select=max(occupancydatetime) as max_ts' \
+    | sed -E 's/.*"max_ts":"([^"]+)".*/\1/')
+
+  start_ts=$(perl -MTime::Piece -e '$s=shift; $t=Time::Piece->strptime($s, "%Y-%m-%dT%H:%M:%S.000"); $t-=86400; print $t->strftime("%Y-%m-%dT%H:%M:%S")' "$max_ts")
+
+  count=$(curl -s --get 'https://cos-data.seattle.gov/resource/hiyf-7edq.json' \
+    --data-urlencode '$select=count(*) as c' \
+    --data-urlencode "\$where=occupancydatetime >= '$start_ts' and occupancydatetime <= '$max_ts'" \
+    | sed -E 's/.*"c":"?([0-9]+)"?.*/\1/')
+
+  {
+    echo "start_ts=$start_ts"
+    echo "max_ts=$max_ts"
+    echo "expected_rows=$count"
+    echo "limit=$LIMIT"
+  } > "$MANIFEST"
+fi
+
+echo "window=$start_ts to $max_ts"
+echo "expected_rows=$count"
+echo "limit=$LIMIT"
+
+echo "step=2 download paginated chunks"
+total_chunks=$(( (count + LIMIT - 1) / LIMIT ))
+idx=0
+while [ "$idx" -lt "$total_chunks" ]; do
+  idx=$((idx + 1))
+  offset=$(( (idx - 1) * LIMIT ))
+  outfile=$(printf "%s/chunk_%04d.json" "$OUTDIR" "$idx")
+
+  if [ -f "$outfile" ] && [ "$(count_rows_in_file "$outfile")" -gt 0 ]; then
+    echo "chunk_skip=$idx offset=$offset file=$(basename "$outfile")"
+    continue
+  fi
+
+  curl -s --get 'https://cos-data.seattle.gov/resource/hiyf-7edq.json' \
+    --data-urlencode "\$where=occupancydatetime >= '$start_ts' and occupancydatetime <= '$max_ts'" \
+    --data-urlencode '$order=occupancydatetime,sourceelementkey' \
+    --data-urlencode "\$limit=$LIMIT" \
+    --data-urlencode "\$offset=$offset" \
+    > "$outfile"
+
+  rows_chunk=$(count_rows_in_file "$outfile")
+  echo "chunk_done=$idx offset=$offset rows=$rows_chunk file=$(basename "$outfile")"
+done
+
+{
+  echo "start_ts=$start_ts"
+  echo "max_ts=$max_ts"
+  echo "expected_rows=$count"
+  echo "limit=$LIMIT"
+  echo "chunk_files=$total_chunks"
+} > "$MANIFEST"
+
+echo "done"
+echo "outdir=$OUTDIR"
+echo "manifest=$MANIFEST"

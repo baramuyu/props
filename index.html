@@ -16,7 +16,7 @@
     <main class="layout">
       <section class="panel">
         <h1>Seattle Parking Availability</h1>
-        <p class="subtitle">MVP using local file: <code>data/hiyf-7edq-latest-60-min.json</code></p>
+        <p class="subtitle">MVP using local file: <code>data/hiyf-7edq-latest-24h-30min-with-stats.ndjson</code></p>
 
         <div class="control-group">
           <label for="addressSearch">Address / Street Search</label>
@@ -31,10 +31,11 @@
         </div>
 
         <div class="control-group">
-          <label for="timeSelect">Time Filter</label>
-          <select id="timeSelect">
-            <option value="latest">Latest per blockface</option>
-          </select>
+          <label for="timeRange">Time Filter</label>
+          <div class="slider-wrap">
+            <input id="timeRange" type="range" min="0" max="0" value="0" step="1" />
+            <span id="timeRangeValue">-</span>
+          </div>
         </div>
 
         <div class="control-group">

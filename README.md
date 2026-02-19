@@ -21,7 +21,7 @@ Web app MVP that visualizes Seattle paid parking availability on a map using a l
   - Orange: 30-59%
   - Red: 0-29%
 - Address/street search (matches blockface and area text)
-- Time selector (`latest per blockface` or exact timestamp)
+- Time slider for available observation buckets
 - Minimum availability slider
 - Popup details on selection:
   - Blockface
@@ -43,6 +43,25 @@ Open:
 
 - `http://localhost:8080`
 
+## Optional Low-Memory Mode (24h data)
+
+If you want 24-hour playback without loading the full 24h file into browser memory:
+
+1. Build the 30-minute aggregated file:
+```bash
+./scripts/build_hiyf_30min_with_stats.bsh
+```
+2. Split by time bucket and create an index:
+```bash
+./scripts/build_hiyf_30min_chunks.bsh
+```
+
+This creates:
+- `data/hiyf-7edq-latest-24h-30min-index.json`
+- `data/hiyf-7edq-latest-24h-30min-by-time/*.json`
+
+When the index exists, `app.js` automatically loads chunk mode and fetches only the selected time bucket.
+
 ## Files
 
 - `index.html` UI layout and controls
@@ -50,3 +69,4 @@ Open:
 - `app.js` data loading, filters, map rendering
 - `data/hiyf-7edq-latest-60-min.json` local MVP dataset
 - `PROJECT_CONTEXT.md` product and architecture context
+- `AGENTS.md` project instructions for coding agents

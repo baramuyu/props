@@ -4,7 +4,7 @@
 Build a Seattle parking availability mapping system using Seattle public occupancy data, starting with dataset `hiyf-7edq`.
 
 ## Current Starting Point
-- Local source file: `data/hiyf-7edq-latest-5-min.json`
+- Local source file: `data/hiyf-7edq-latest-60-min.json`
 - Initial mode: read local file, normalize records, render map availability
 - Future mode: periodic ingestion from Seattle Open Data API
 
@@ -74,6 +74,10 @@ Store app-facing records as `parking_observations`:
 - Track ingest stats: row count, valid count, dropped count, error reason
 - Keep ingestion metadata: `window_start`, `window_end`, `downloaded_at`
 
+## Agent Governance
+- `AGENTS.md` at repo root is the project instruction file for coding agents.
+- Agent work should remain MVP-focused and aligned with `README.md` + this context doc.
+
 ## Suggested Repository Structure
 - `data/` raw snapshots
 - `docs/` project docs, ADRs, runbooks
@@ -83,7 +87,7 @@ Store app-facing records as `parking_observations`:
 - `src/ui/` map application
 
 ## Milestones
-1. Local-file MVP working from `data/hiyf-7edq-latest-5-min.json`
+1. Local-file MVP working from `data/hiyf-7edq-latest-60-min.json`
 2. Add automated fetcher and append-only raw archive
 3. Add normalized store + dedup
 4. Add trend analytics and deploy
