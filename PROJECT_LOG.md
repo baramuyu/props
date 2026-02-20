@@ -1,6 +1,6 @@
 # PROJECT_LOG
 
-Last updated: 2026-02-19
+Last updated: 2026-02-20
 
 ## Current Goal
 Build and iterate a Seattle paid parking availability web app using Seattle Open Data dataset `hiyf-7edq`.
@@ -8,9 +8,19 @@ Build and iterate a Seattle paid parking availability web app using Seattle Open
 ## Current App State
 - Frontend: static app (`index.html`, `styles.css`, `app.js`) with Leaflet map.
 - Time filter: changed from dropdown to range slider.
+- Added day-of-week UI filter (`All Days`, `Sun`-`Sat` based on available rows).
+- Added paid parking area UI filter (`All Areas` + dynamic `paid_parking_area` options).
+- Changing area selection now re-renders and zooms map to the selected area result set.
+- Fixed area zoom bug: map now applies `fitBounds` before low-zoom marker gating, so area selection reliably zooms in.
+- Improved area switching: area change now zooms using all rows in that area (independent of current time/day slice), then applies active filters for display.
+- Removed Day-of-Week and Minimum Availability controls from UI.
+- Added white circle marker state for no-data points (`NO DATA` payment status).
 - Data source currently in app: `/data/hiyf-7edq-latest-24h-30min-with-stats.ndjson`.
 - Popup includes occupancy, availability, and 30-min minute-level stats in app logic.
 - App loader now parses NDJSON directly and supports precomputed `minute_stats` rows.
+- Fixed no-data rendering bug: no-data rows now always render as white circles (not free badges).
+- Fixed time-bucket alignment bug for NDJSON: app now anchors bucket time from `occupancydatetime` instead of the offset `bucketstartdatetime` value.
+- Time slider day window is anchored to Seattle time (`America/Los_Angeles`) and displays a full-day range from `12:00:00 AM` to `11:59:59 PM`.
 
 ## Data Pipeline State
 ### Downloads
@@ -36,11 +46,9 @@ Build and iterate a Seattle paid parking availability web app using Seattle Open
 - Added `scripts/README.md` with current run commands.
 
 ## Known Open Work
-1. Finish/verify full chunk download completeness.
-2. Run and verify 30-min reduction from chunks.
-3. Optionally switch app source to reduced file for better performance.
-4. Clean up docs to match final chosen data source and workflow.
-5. Commit/push pending local changes.
+1. Optional: run browser-level regression pass for area switch + time slider behavior.
+2. Clean up docs to fully reflect current UI (remove old references in README).
+3. Commit/push remaining local non-bugfix changes when ready.
 
 ## Quick Commands
 ### Resume chunk download
