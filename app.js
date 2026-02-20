@@ -3,6 +3,10 @@ const DEFAULT_CENTER = [47.6062, -122.3321];
 const DEFAULT_ZOOM = 13;
 const BUCKET_MS_SIZE = 30 * 60 * 1000;
 const DETAIL_ZOOM_MIN = 14;
+const SEATTLE_TIME_ZONE = "America/Los_Angeles";
+const BLOCKFACE_SCHEDULE_FILES = [
+  "/data/hiyf-7edq-location-paid-time-metadata.json",
+];
 
 const map = L.map("map").setView(DEFAULT_CENTER, DEFAULT_ZOOM);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -15,8 +19,7 @@ const addressSearch = document.getElementById("addressSearch");
 const clearSearchBtn = document.getElementById("clearSearchBtn");
 const timeRange = document.getElementById("timeRange");
 const timeRangeValue = document.getElementById("timeRangeValue");
-const minAvailability = document.getElementById("minAvailability");
-const minAvailabilityValue = document.getElementById("minAvailabilityValue");
+const paidAreaSelect = document.getElementById("paidAreaSelect");
 const refreshBtn = document.getElementById("refreshBtn");
 const statusEl = document.getElementById("status");
 
@@ -31,6 +34,9 @@ let timeEntries = [];
 let hasFitOnce = false;
 let useChunkMode = false;
 let activeChunkFetch = null;
+let sliderDayStartMs = null;
+let blockfaceScheduleByKey = new Map();
+let blockfaceScheduleSource = null;
 
 function setStatus(msg) {
   statusEl.textContent = msg;
@@ -54,6 +60,500 @@ function markerColor(availabilityPct) {
     return "#d68910";
   }
   return "#c0392b";
+}
+
+const freeIcon = L.divIcon({
+  className: "free-marker-wrapper",
+  html: '<span class="free-marker-badge">Free</span>',
+  iconSize: [38, 18],
+  iconAnchor: [19, 9],
+  popupAnchor: [0, -8],
+});
+
+function hasActivePaymentTransaction(point) {
+  return point.occupiedSpaces > 0;
+}
+
+function isNoDataPoint(point) {
+  if (!point) {
+    return true;
+  }
+  if (!Number.isFinite(point.occupiedSpaces) || !Number.isFinite(point.totalSpaces)) {
+    return true;
+  }
+  if (point.minuteStats && Number.isFinite(point.minuteStats.coverageMinutes)) {
+    return point.minuteStats.coverageMinutes <= 0;
+  }
+  return false;
+}
+
+function toBoolean(value) {
+  if (typeof value === "boolean") {
+    return value;
+  }
+  if (typeof value === "number") {
+    return value !== 0;
+  }
+  if (typeof value === "string") {
+    const normalized = value.trim().toLowerCase();
+    if (["true", "1", "yes", "y"].includes(normalized)) {
+      return true;
+    }
+    if (["false", "0", "no", "n"].includes(normalized)) {
+      return false;
+    }
+  }
+  return null;
+}
+
+function isExplicitFreeRow(row) {
+  const directFlags = [
+    row.isfree,
+    row.is_free,
+    row.free,
+    row.freeparking,
+    row.isfreetime,
+    row.is_free_time,
+  ];
+  if (directFlags.some((value) => toBoolean(value) === true)) {
+    return true;
+  }
+
+  const category = String(row.parkingcategory || "").toLowerCase();
+  const paymentStatus = String(row.paymentstatus || row.payment_status || "").toLowerCase();
+  return category.includes("free") || paymentStatus === "free";
+}
+
+function markerColorForPoint(point) {
+  return markerColor(point.availabilityPct);
+}
+
+function normalizeKeyName(value) {
+  return String(value || "")
+    .toLowerCase()
+    .replace(/[^a-z0-9]/g, "");
+}
+
+function parseCsvText(text) {
+  const rows = [];
+  let current = "";
+  let row = [];
+  let inQuotes = false;
+
+  for (let i = 0; i < text.length; i += 1) {
+    const char = text[i];
+    const next = text[i + 1];
+
+    if (char === '"') {
+      if (inQuotes && next === '"') {
+        current += '"';
+        i += 1;
+      } else {
+        inQuotes = !inQuotes;
+      }
+      continue;
+    }
+
+    if (char === "," && !inQuotes) {
+      row.push(current);
+      current = "";
+      continue;
+    }
+
+    if ((char === "\n" || char === "\r") && !inQuotes) {
+      if (char === "\r" && next === "\n") {
+        i += 1;
+      }
+      row.push(current);
+      current = "";
+      if (row.some((cell) => cell.trim() !== "")) {
+        rows.push(row);
+      }
+      row = [];
+      continue;
+    }
+
+    current += char;
+  }
+
+  if (current.length || row.length) {
+    row.push(current);
+    if (row.some((cell) => cell.trim() !== "")) {
+      rows.push(row);
+    }
+  }
+
+  if (!rows.length) {
+    return [];
+  }
+
+  const headers = rows[0].map((h) => h.trim());
+  return rows.slice(1).map((cells) => {
+    const obj = {};
+    for (let i = 0; i < headers.length; i += 1) {
+      obj[headers[i]] = cells[i] ?? "";
+    }
+    return obj;
+  });
+}
+
+function parseServiceDate(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const raw = String(value).trim();
+  if (!raw) {
+    return null;
+  }
+
+  const isoMatch = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+  if (isoMatch) {
+    return Number(`${isoMatch[1]}${isoMatch[2]}${isoMatch[3]}`);
+  }
+
+  const abbrMatch = raw.match(/^(\d{1,2})-([A-Za-z]{3})-(\d{2}|\d{4})$/);
+  if (!abbrMatch) {
+    return null;
+  }
+
+  const monthMap = {
+    jan: 1,
+    feb: 2,
+    mar: 3,
+    apr: 4,
+    may: 5,
+    jun: 6,
+    jul: 7,
+    aug: 8,
+    sep: 9,
+    oct: 10,
+    nov: 11,
+    dec: 12,
+  };
+
+  const day = Number(abbrMatch[1]);
+  const month = monthMap[abbrMatch[2].toLowerCase()];
+  let year = Number(abbrMatch[3]);
+  if (!month || !Number.isFinite(day) || !Number.isFinite(year)) {
+    return null;
+  }
+  if (year < 100) {
+    year += year >= 70 ? 1900 : 2000;
+  }
+
+  return year * 10000 + month * 100 + day;
+}
+
+function parseTimeToMinutes(value) {
+  if (value === null || value === undefined) {
+    return null;
+  }
+
+  const numeric = toNumber(value);
+  if (numeric !== null) {
+    const intVal = Math.round(numeric);
+    if (intVal >= 0 && intVal <= 24 * 60) {
+      return intVal;
+    }
+    if (intVal >= 0 && intVal <= 2359) {
+      const hours = Math.floor(intVal / 100);
+      const mins = intVal % 100;
+      if (hours <= 24 && mins < 60) {
+        return hours * 60 + mins;
+      }
+    }
+  }
+
+  const raw = String(value).trim().toUpperCase();
+  if (!raw) {
+    return null;
+  }
+
+  const ampmMatch = raw.match(/^(\d{1,2})(?::(\d{2}))?\s*([AP]M)$/);
+  if (ampmMatch) {
+    let hour = Number(ampmMatch[1]) % 12;
+    const minute = Number(ampmMatch[2] || 0);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || minute >= 60) {
+      return null;
+    }
+    if (ampmMatch[3] === "PM") {
+      hour += 12;
+    }
+    return hour * 60 + minute;
+  }
+
+  const hmsMatch = raw.match(/^(\d{1,2}):(\d{2})(?::\d{2})?$/);
+  if (hmsMatch) {
+    const hour = Number(hmsMatch[1]);
+    const minute = Number(hmsMatch[2]);
+    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour > 24 || minute >= 60) {
+      return null;
+    }
+    return hour * 60 + minute;
+  }
+
+  return null;
+}
+
+function seattleTimeParts(ms) {
+  const parts = new Intl.DateTimeFormat("en-US", {
+    timeZone: SEATTLE_TIME_ZONE,
+    weekday: "short",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    hour12: false,
+  }).formatToParts(new Date(ms));
+
+  const lookup = {};
+  for (const part of parts) {
+    if (part.type !== "literal") {
+      lookup[part.type] = part.value;
+    }
+  }
+
+  const year = Number(lookup.year);
+  const month = Number(lookup.month);
+  const day = Number(lookup.day);
+  const hour = Number(lookup.hour);
+  const minute = Number(lookup.minute);
+
+  return {
+    weekday: lookup.weekday || "",
+    minuteOfDay: (Number.isFinite(hour) ? hour : 0) * 60 + (Number.isFinite(minute) ? minute : 0),
+    yyyymmdd:
+      (Number.isFinite(year) ? year : 0) * 10000 +
+      (Number.isFinite(month) ? month : 0) * 100 +
+      (Number.isFinite(day) ? day : 0),
+  };
+}
+
+function minuteInWindow(minuteOfDay, startMinute, endMinute) {
+  if (
+    !Number.isFinite(minuteOfDay) ||
+    !Number.isFinite(startMinute) ||
+    !Number.isFinite(endMinute)
+  ) {
+    return false;
+  }
+  if (startMinute === endMinute) {
+    return true;
+  }
+  if (startMinute < endMinute) {
+    return minuteOfDay >= startMinute && minuteOfDay < endMinute;
+  }
+  return minuteOfDay >= startMinute || minuteOfDay < endMinute;
+}
+
+function normalizeScheduleRow(rawRow) {
+  const normalized = {};
+  for (const [key, value] of Object.entries(rawRow || {})) {
+    normalized[normalizeKeyName(key)] = value;
+  }
+
+  const get = (...names) => {
+    for (const name of names) {
+      const value = normalized[normalizeKeyName(name)];
+      if (value !== null && value !== undefined && String(value).trim() !== "") {
+        return value;
+      }
+    }
+    return null;
+  };
+
+  const sourceElementKey = String(
+    get("sourceelementkey", "source_element_key", "elementkey", "element_key") || ""
+  ).trim();
+  if (!sourceElementKey) {
+    return null;
+  }
+
+  const dayWindows = (dayName) => {
+    const day = dayName.toLowerCase();
+    const windows = [];
+    const directStart = parseTimeToMinutes(get(`starttime${day}`));
+    const directEnd = parseTimeToMinutes(get(`endtime${day}`));
+    if (directStart !== null && directEnd !== null) {
+      windows.push({ startMinute: directStart, endMinute: directEnd });
+    }
+
+    for (let i = 1; i <= 4; i += 1) {
+      const startMinute = parseTimeToMinutes(
+        get(`${day}start${i}`, `${day}starttime${i}`)
+      );
+      const endMinute = parseTimeToMinutes(get(`${day}end${i}`, `${day}endtime${i}`));
+      if (startMinute !== null && endMinute !== null) {
+        windows.push({ startMinute, endMinute });
+      }
+    }
+
+    const genericStart = parseTimeToMinutes(get(`${day}start`));
+    const genericEnd = parseTimeToMinutes(get(`${day}end`));
+    if (genericStart !== null && genericEnd !== null) {
+      windows.push({ startMinute: genericStart, endMinute: genericEnd });
+    }
+
+    return windows;
+  };
+
+  return {
+    sourceElementKey,
+    effectiveStartDate: parseServiceDate(
+      get("effectivestartdate", "startdate", "firsteffectivedate")
+    ),
+    effectiveEndDate: parseServiceDate(
+      get("effectiveenddate", "enddate", "lasteffectivedate")
+    ),
+    weekdayWindows: dayWindows("weekday"),
+    saturdayWindows: dayWindows("saturday"),
+    sundayWindows: dayWindows("sunday"),
+  };
+}
+
+function buildBlockfaceScheduleIndex(rawRows) {
+  const index = new Map();
+
+  for (const rawRow of rawRows) {
+    const row = normalizeScheduleRow(rawRow);
+    if (!row) {
+      continue;
+    }
+
+    const key = String(row.sourceElementKey).trim();
+    if (!index.has(key)) {
+      index.set(key, []);
+    }
+    index.get(key).push(row);
+  }
+
+  for (const records of index.values()) {
+    records.sort((a, b) => {
+      const aStart = a.effectiveStartDate ?? -Infinity;
+      const bStart = b.effectiveStartDate ?? -Infinity;
+      return bStart - aStart;
+    });
+  }
+
+  return index;
+}
+
+function parseScheduleRows(rawText, filePath) {
+  if (filePath.endsWith(".json")) {
+    const parsed = JSON.parse(rawText);
+    if (Array.isArray(parsed)) {
+      return parsed;
+    }
+    if (Array.isArray(parsed.rows)) {
+      return parsed.rows;
+    }
+    if (Array.isArray(parsed.data)) {
+      return parsed.data;
+    }
+    return [];
+  }
+  return parseCsvText(rawText);
+}
+
+async function loadBlockfaceScheduleData() {
+  blockfaceScheduleByKey = new Map();
+  blockfaceScheduleSource = null;
+
+  for (const filePath of BLOCKFACE_SCHEDULE_FILES) {
+    try {
+      const res = await fetch(filePath, { cache: "no-store" });
+      if (!res.ok) {
+        continue;
+      }
+      const rawText = await res.text();
+      if (!rawText.trim()) {
+        continue;
+      }
+
+      const rawRows = parseScheduleRows(rawText, filePath);
+      const scheduleIndex = buildBlockfaceScheduleIndex(rawRows);
+      if (!scheduleIndex.size) {
+        continue;
+      }
+
+      blockfaceScheduleByKey = scheduleIndex;
+      blockfaceScheduleSource = filePath;
+      return;
+    } catch (_err) {
+      // Keep trying fallback files.
+    }
+  }
+}
+
+function selectScheduleRecordForDate(records, yyyymmdd) {
+  if (!records.length) {
+    return null;
+  }
+
+  const matched = records.find((record) => {
+    const start = record.effectiveStartDate;
+    const end = record.effectiveEndDate;
+    if (start !== null && yyyymmdd < start) {
+      return false;
+    }
+    if (end !== null && yyyymmdd > end) {
+      return false;
+    }
+    return true;
+  });
+
+  return matched || records[0];
+}
+
+function evaluateScheduleFreeStatus(sourceElementKey, observedAtMs) {
+  const key = String(sourceElementKey || "").trim();
+  const records = key ? blockfaceScheduleByKey.get(key) : null;
+  if (!records || !records.length) {
+    return {
+      known: false,
+      isFree: false,
+      reason: "Schedule unavailable for this blockface",
+    };
+  }
+
+  const time = seattleTimeParts(observedAtMs);
+  const record = selectScheduleRecordForDate(records, time.yyyymmdd);
+  if (!record) {
+    return {
+      known: false,
+      isFree: false,
+      reason: "No valid schedule record",
+    };
+  }
+
+  let windows = record.weekdayWindows;
+  if (time.weekday === "Sat") {
+    windows = record.saturdayWindows;
+  } else if (time.weekday === "Sun") {
+    windows = record.sundayWindows;
+  }
+
+  if (!windows.length) {
+    return {
+      known: true,
+      isFree: true,
+      reason: `Outside paid schedule (${time.weekday})`,
+    };
+  }
+
+  const inPaidWindow = windows.some((window) =>
+    minuteInWindow(time.minuteOfDay, window.startMinute, window.endMinute)
+  );
+
+  return {
+    known: true,
+    isFree: !inPaidWindow,
+    reason: inPaidWindow
+      ? `Inside paid schedule (${time.weekday})`
+      : `Outside paid schedule (${time.weekday})`,
+  };
 }
 
 function formatLocalTime(ms) {
@@ -107,14 +607,20 @@ function normalizeRow(row) {
   const available = Math.max(total - clampedOccupied, 0);
   const occupancyPct = (clampedOccupied / total) * 100;
   const availabilityPct = 100 - occupancyPct;
+  const sourceElementKey = row.sourceelementkey || `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  const scheduleStatus = evaluateScheduleFreeStatus(sourceElementKey, ts);
+  const explicitFree = isExplicitFreeRow(row);
 
   return {
-    sourceElementKey: row.sourceelementkey || `${lat.toFixed(5)},${lon.toFixed(5)}`,
+    sourceElementKey,
     blockfaceName: row.blockfacename || "Unknown blockface",
     sideOfStreet: row.sideofstreet || "",
     paidParkingArea: row.paidparkingarea || "Unknown",
     paidParkingSubarea: row.paidparkingsubarea || "",
     parkingCategory: row.parkingcategory || "Unknown",
+    isFree: explicitFree || scheduleStatus.isFree,
+    freeReason: explicitFree ? "Marked free in source data" : scheduleStatus.reason,
+    scheduleKnown: scheduleStatus.known,
     observedAtMs: ts,
     observedAtRaw: row.occupancydatetime,
     occupiedSpaces: clampedOccupied,
@@ -133,9 +639,7 @@ function normalizeBucketedRow(row) {
     return null;
   }
 
-  const bucketStartMs =
-    parseTimestamp(row.bucketstartdatetime) ||
-    Math.floor(base.observedAtMs / BUCKET_MS_SIZE) * BUCKET_MS_SIZE;
+  const bucketStartMs = Math.floor(base.observedAtMs / BUCKET_MS_SIZE) * BUCKET_MS_SIZE;
 
   const stats = row.minute_stats || row.minuteStats || {};
   const occupiedAvg = toNumber(stats.occupied_avg);
@@ -264,14 +768,40 @@ function selectedTimeEntry() {
 
 function updateTimeRangeLabel() {
   const selected = selectedTimeMs();
-  timeRangeValue.textContent = selected ? new Date(selected).toLocaleString() : "-";
+  if (!selected) {
+    timeRangeValue.textContent = "-";
+    return;
+  }
+  timeRangeValue.textContent = new Date(selected).toLocaleTimeString();
+}
+
+function initializePaidAreaFilter(rows) {
+  const previousValue = paidAreaSelect.value || "all";
+  const uniqueAreas = [...new Set(rows.map((row) => String(row.paidParkingArea || "").trim()))]
+    .filter(Boolean)
+    .sort((a, b) => a.localeCompare(b));
+
+  paidAreaSelect.innerHTML = '<option value="all">All Areas</option>';
+  for (const area of uniqueAreas) {
+    const option = document.createElement("option");
+    option.value = area;
+    option.textContent = area;
+    paidAreaSelect.appendChild(option);
+  }
+
+  if (previousValue !== "all" && uniqueAreas.includes(previousValue)) {
+    paidAreaSelect.value = previousValue;
+  } else {
+    paidAreaSelect.value = "all";
+  }
+  paidAreaSelect.disabled = uniqueAreas.length <= 1;
 }
 
 function initTimeRangeFromValues(values) {
   const unique = [...new Set(values)].filter((v) => Number.isFinite(v)).sort((a, b) => a - b);
-  timeValues = unique;
-
-  if (!timeValues.length) {
+  if (!unique.length) {
+    timeValues = [];
+    sliderDayStartMs = null;
     timeRange.min = "0";
     timeRange.max = "0";
     timeRange.value = "0";
@@ -280,23 +810,36 @@ function initTimeRangeFromValues(values) {
     return;
   }
 
+  // Force a full Seattle-day slider: 12:00:00 AM to 11:59:59 PM (30-min slots).
+  const latest = unique[unique.length - 1];
+  const latestSeattle = seattleTimeParts(latest);
+  sliderDayStartMs = latest - latestSeattle.minuteOfDay * 60 * 1000;
+  timeValues = Array.from({ length: 48 }, (_, i) => sliderDayStartMs + i * BUCKET_MS_SIZE);
+
   timeRange.min = "0";
-  timeRange.max = String(timeValues.length - 1);
-  timeRange.value = String(timeValues.length - 1);
+  timeRange.max = "47";
+  // Default to latest available bucket within the day.
+  const latestIdx = Math.min(
+    47,
+    Math.max(0, Math.floor((latest - sliderDayStartMs) / BUCKET_MS_SIZE))
+  );
+  timeRange.value = String(latestIdx);
   timeRange.disabled = timeValues.length <= 1;
   updateTimeRangeLabel();
 }
 
 function filteredPoints() {
   const selectedTime = selectedTimeMs();
-  const minAvail = Number(minAvailability.value);
+  const selectedArea = paidAreaSelect.value;
   const query = normalizeText(addressSearch.value);
 
   let points = useChunkMode
     ? bucketRows
     : bucketRows.filter((row) => row.bucketStartMs === selectedTime);
 
-  points = points.filter((row) => row.availabilityPct >= minAvail);
+  if (selectedArea && selectedArea !== "all") {
+    points = points.filter((row) => String(row.paidParkingArea || "").trim() === selectedArea);
+  }
 
   if (query) {
     points = points.filter((row) => {
@@ -326,6 +869,25 @@ function updateStats(points) {
   statAvgAvail.textContent = `${availAvg.toFixed(1)}%`;
 }
 
+function zoomToArea(areaValue) {
+  const targetArea = String(areaValue || "").trim();
+  if (!targetArea || targetArea === "all") {
+    return false;
+  }
+
+  const areaPoints = bucketRows.filter(
+    (row) => String(row.paidParkingArea || "").trim() === targetArea
+  );
+  if (!areaPoints.length) {
+    return false;
+  }
+
+  const bounds = L.latLngBounds(areaPoints.map((p) => [p.latitude, p.longitude]));
+  map.fitBounds(bounds.pad(0.1));
+  hasFitOnce = true;
+  return true;
+}
+
 function render(options = {}) {
   const shouldFitMap = options.fitMap ?? false;
   updateTimeRangeLabel();
@@ -338,6 +900,12 @@ function render(options = {}) {
     return;
   }
 
+  if (shouldFitMap || !hasFitOnce) {
+    const bounds = L.latLngBounds(points.map((p) => [p.latitude, p.longitude]));
+    map.fitBounds(bounds.pad(0.1));
+    hasFitOnce = true;
+  }
+
   if (map.getZoom() < DETAIL_ZOOM_MIN) {
     setStatus(
       `Zoom in to level ${DETAIL_ZOOM_MIN}+ to view payment station status. ${points.length.toLocaleString()} match current filters.`
@@ -346,13 +914,32 @@ function render(options = {}) {
   }
 
   for (const point of points) {
-    const marker = L.circleMarker([point.latitude, point.longitude], {
-      radius: 7,
-      fillColor: markerColor(point.availabilityPct),
-      color: "#ffffff",
-      weight: 1,
-      fillOpacity: 0.92,
-    });
+    const noData = isNoDataPoint(point);
+    const paymentStatus = noData
+      ? "NO DATA"
+      : point.isFree
+        ? "Free (outside paid time)"
+        : hasActivePaymentTransaction(point)
+          ? "PAID (active payment transaction)"
+          : "NO PAID TRANSACTION";
+
+    const marker = noData
+      ? L.circleMarker([point.latitude, point.longitude], {
+          radius: 7,
+          fillColor: "#ffffff",
+          color: "#5f6a6a",
+          weight: 1,
+          fillOpacity: 1,
+        })
+      : point.isFree
+        ? L.marker([point.latitude, point.longitude], { icon: freeIcon })
+        : L.circleMarker([point.latitude, point.longitude], {
+            radius: 7,
+            fillColor: markerColorForPoint(point),
+            color: "#ffffff",
+            weight: 1,
+            fillOpacity: 0.92,
+          });
 
     marker.bindPopup(`
       <div class="popup-title">${escapeHtml(point.blockfaceName)}</div>
@@ -361,6 +948,8 @@ function render(options = {}) {
       <div>Side: ${escapeHtml(point.sideOfStreet || "Unknown")}</div>
       <div>Area: ${escapeHtml(point.paidParkingArea)}${point.paidParkingSubarea ? ` (${escapeHtml(point.paidParkingSubarea)})` : ""}</div>
       <div>Category: ${escapeHtml(point.parkingCategory)}</div>
+      <div>Payment Status: ${paymentStatus}</div>
+      <div>Paid-Time Rule: ${escapeHtml(point.freeReason || "Unknown")}</div>
       <div>Occupied: ${point.occupiedSpaces}</div>
       <div>Total Spaces: ${point.totalSpaces}</div>
       <div>Available Spaces: ${point.availableSpaces}</div>
@@ -376,24 +965,20 @@ function render(options = {}) {
     marker.addTo(markerLayer);
   }
 
-  if (shouldFitMap || !hasFitOnce) {
-    const bounds = L.latLngBounds(points.map((p) => [p.latitude, p.longitude]));
-    map.fitBounds(bounds.pad(0.1));
-    hasFitOnce = true;
-  }
-
-  setStatus(`Showing ${points.length.toLocaleString()} blockfaces.`);
+  const scheduleNote = blockfaceScheduleSource
+    ? ` Paid-time rules loaded from ${blockfaceScheduleSource}.`
+    : " Paid-time rules unavailable (using transaction/availability only).";
+  setStatus(`Showing ${points.length.toLocaleString()} blockfaces.${scheduleNote}`);
 }
 
 function updateWindowStat() {
-  if (!timeValues.length) {
+  if (!timeValues.length || sliderDayStartMs === null) {
     statWindow.textContent = "-";
     return;
   }
 
-  const earliest = timeValues[0];
-  const latest = timeValues[timeValues.length - 1];
-  statWindow.textContent = `${new Date(earliest).toLocaleTimeString()} - ${new Date(latest).toLocaleTimeString()}`;
+  const dayEnd = sliderDayStartMs + (24 * 60 * 60 * 1000) - 1000;
+  statWindow.textContent = `${new Date(sliderDayStartMs).toLocaleTimeString()} - ${new Date(dayEnd).toLocaleTimeString()}`;
 }
 
 async function loadSelectedChunkTime(options = {}) {
@@ -485,10 +1070,13 @@ async function loadLocalData() {
   refreshBtn.disabled = true;
 
   try {
+    await loadBlockfaceScheduleData();
     const loadedChunks = await loadChunkIndex();
     if (!loadedChunks) {
       await loadSingleFileData();
     }
+    initializePaidAreaFilter(bucketRows);
+    render({ fitMap: false });
   } catch (err) {
     markerLayer.clearLayers();
     statBlockfaces.textContent = "-";
@@ -514,9 +1102,10 @@ timeRange.addEventListener("change", async () => {
   }
   render({ fitMap: false });
 });
-minAvailability.addEventListener("input", () => {
-  minAvailabilityValue.textContent = `${minAvailability.value}%`;
-  render({ fitMap: false });
+paidAreaSelect.addEventListener("change", () => {
+  const selectedArea = paidAreaSelect.value;
+  const didZoom = zoomToArea(selectedArea);
+  render({ fitMap: !didZoom });
 });
 map.on("zoomend", () => render({ fitMap: false }));
 refreshBtn.addEventListener("click", loadLocalData);
