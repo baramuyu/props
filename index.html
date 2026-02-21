@@ -16,7 +16,6 @@
     <main class="layout">
       <section class="panel">
         <h1>Seattle Parking Availability</h1>
-        <p class="subtitle">MVP using local file: <code>data/hiyf-7edq-latest-24h-30min-with-stats.ndjson</code></p>
 
         <div class="control-group">
           <label for="addressSearch">Address / Street Search</label>
@@ -39,33 +38,11 @@
         </div>
 
         <div class="control-group">
-          <label for="minAvailability">Minimum Availability</label>
-          <div class="slider-wrap">
-            <input id="minAvailability" type="range" min="0" max="100" value="0" step="5" />
-            <span id="minAvailabilityValue">0%</span>
-          </div>
+          <label for="paidAreaSelect">Paid Parking Area</label>
+          <select id="paidAreaSelect">
+            <option value="all">All Areas</option>
+          </select>
         </div>
-
-        <button id="refreshBtn" type="button">Reload Local Data</button>
-
-        <dl class="stats" id="statsPanel">
-          <div>
-            <dt>Visible Blockfaces</dt>
-            <dd id="statBlockfaces">-</dd>
-          </div>
-          <div>
-            <dt>Average Occupancy</dt>
-            <dd id="statAvgOcc">-</dd>
-          </div>
-          <div>
-            <dt>Average Availability</dt>
-            <dd id="statAvgAvail">-</dd>
-          </div>
-          <div>
-            <dt>Data Time Window</dt>
-            <dd id="statWindow">-</dd>
-          </div>
-        </dl>
 
         <div class="legend">
           <h2>Availability Legend</h2>
@@ -75,6 +52,11 @@
         </div>
 
         <p id="status" class="status">Loading local file...</p>
+        <div class="meta">
+          <p>MVP using local file</p>
+          <p>Visible Blockfaces: <span id="metaVisibleCount">-</span></p>
+          <p>Data source: <code id="metaDataSource">-</code></p>
+        </div>
       </section>
 
       <section class="map-wrap">

@@ -1,12 +1,16 @@
-const DATA_FILE = "/data/hiyf-7edq-latest-24h-30min-with-stats.ndjson";
+const DATA_FILES = [
+  "/data/hiyf-7edq-latest-24h-30min-with-stats.ndjson",
+];
 const DEFAULT_CENTER = [47.6062, -122.3321];
-const DEFAULT_ZOOM = 13;
+const DEFAULT_ZOOM = 15;
 const BUCKET_MS_SIZE = 30 * 60 * 1000;
+const DEFAULT_TIME_MINUTE_OF_DAY = 8 * 60;
 const DETAIL_ZOOM_MIN = 14;
 const SEATTLE_TIME_ZONE = "America/Los_Angeles";
 const BLOCKFACE_SCHEDULE_FILES = [
   "/data/hiyf-7edq-location-paid-time-metadata.json",
 ];
+const CHUNK_INDEX_FILES = ["/data/hiyf-7edq-latest-24h-30min-index.json"];
 
 const map = L.map("map").setView(DEFAULT_CENTER, DEFAULT_ZOOM);
 L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png", {
@@ -20,26 +24,41 @@ const clearSearchBtn = document.getElementById("clearSearchBtn");
 const timeRange = document.getElementById("timeRange");
 const timeRangeValue = document.getElementById("timeRangeValue");
 const paidAreaSelect = document.getElementById("paidAreaSelect");
-const refreshBtn = document.getElementById("refreshBtn");
 const statusEl = document.getElementById("status");
-
-const statBlockfaces = document.getElementById("statBlockfaces");
-const statAvgOcc = document.getElementById("statAvgOcc");
-const statAvgAvail = document.getElementById("statAvgAvail");
-const statWindow = document.getElementById("statWindow");
+const metaVisibleCount = document.getElementById("metaVisibleCount");
+const metaDataSource = document.getElementById("metaDataSource");
 
 let bucketRows = [];
 let timeValues = [];
 let timeEntries = [];
-let hasFitOnce = false;
+let hasFitOnce = true;
 let useChunkMode = false;
 let activeChunkFetch = null;
 let sliderDayStartMs = null;
 let blockfaceScheduleByKey = new Map();
 let blockfaceScheduleSource = null;
+let activeDataFile = DATA_FILES[0];
 
 function setStatus(msg) {
   statusEl.textContent = msg;
+}
+
+function setVisibleBlockfaceCount(value) {
+  if (!metaVisibleCount) {
+    return;
+  }
+  if (Number.isFinite(value)) {
+    metaVisibleCount.textContent = Number(value).toLocaleString();
+    return;
+  }
+  metaVisibleCount.textContent = "-";
+}
+
+function setDataSourceLabel(value) {
+  if (!metaDataSource) {
+    return;
+  }
+  metaDataSource.textContent = value || "-";
 }
 
 function toNumber(value) {
@@ -60,31 +79,6 @@ function markerColor(availabilityPct) {
     return "#d68910";
   }
   return "#c0392b";
-}
-
-const freeIcon = L.divIcon({
-  className: "free-marker-wrapper",
-  html: '<span class="free-marker-badge">Free</span>',
-  iconSize: [38, 18],
-  iconAnchor: [19, 9],
-  popupAnchor: [0, -8],
-});
-
-function hasActivePaymentTransaction(point) {
-  return point.occupiedSpaces > 0;
-}
-
-function isNoDataPoint(point) {
-  if (!point) {
-    return true;
-  }
-  if (!Number.isFinite(point.occupiedSpaces) || !Number.isFinite(point.totalSpaces)) {
-    return true;
-  }
-  if (point.minuteStats && Number.isFinite(point.minuteStats.coverageMinutes)) {
-    return point.minuteStats.coverageMinutes <= 0;
-  }
-  return false;
 }
 
 function toBoolean(value) {
@@ -122,6 +116,20 @@ function isExplicitFreeRow(row) {
   const category = String(row.parkingcategory || "").toLowerCase();
   const paymentStatus = String(row.paymentstatus || row.payment_status || "").toLowerCase();
   return category.includes("free") || paymentStatus === "free";
+}
+
+function isExplicitNoDataRow(row) {
+  const directFlags = [row.isnodata, row.is_no_data, row.nodata, row.no_data];
+  if (directFlags.some((value) => toBoolean(value) === true)) {
+    return true;
+  }
+
+  const paymentStatus = String(row.paymentstatus || row.payment_status || "")
+    .toLowerCase()
+    .replace(/\s+/g, " ")
+    .trim();
+
+  return paymentStatus === "no data" || paymentStatus === "nodata";
 }
 
 function markerColorForPoint(point) {
@@ -259,7 +267,10 @@ function parseTimeToMinutes(value) {
     if (intVal >= 0 && intVal <= 2359) {
       const hours = Math.floor(intVal / 100);
       const mins = intVal % 100;
-      if (hours <= 24 && mins < 60) {
+      if (hours < 24 && mins < 60) {
+        return hours * 60 + mins;
+      }
+      if (hours === 24 && mins === 0) {
         return hours * 60 + mins;
       }
     }
@@ -287,7 +298,13 @@ function parseTimeToMinutes(value) {
   if (hmsMatch) {
     const hour = Number(hmsMatch[1]);
     const minute = Number(hmsMatch[2]);
-    if (!Number.isFinite(hour) || !Number.isFinite(minute) || hour > 24 || minute >= 60) {
+    if (
+      !Number.isFinite(hour) ||
+      !Number.isFinite(minute) ||
+      hour > 24 ||
+      minute > 59 ||
+      (hour === 24 && minute !== 0)
+    ) {
       return null;
     }
     return hour * 60 + minute;
@@ -348,6 +365,41 @@ function minuteInWindow(minuteOfDay, startMinute, endMinute) {
   return minuteOfDay >= startMinute || minuteOfDay < endMinute;
 }
 
+function formatMinuteLabel(minuteOfDay) {
+  const clamped = Math.max(0, Math.min(24 * 60, Math.round(minuteOfDay)));
+  const hour24 = Math.floor(clamped / 60) % 24;
+  const minute = clamped % 60;
+  const suffix = hour24 >= 12 ? "PM" : "AM";
+  const hour12 = hour24 % 12 === 0 ? 12 : hour24 % 12;
+  if (minute === 0) {
+    return `${hour12}${suffix}`;
+  }
+  return `${hour12}:${String(minute).padStart(2, "0")}${suffix}`;
+}
+
+function formatChargingPeriod(windows) {
+  if (!Array.isArray(windows) || !windows.length) {
+    return "None (Free all day)";
+  }
+
+  return windows
+    .map((window) => {
+      if (
+        !window ||
+        !Number.isFinite(window.startMinute) ||
+        !Number.isFinite(window.endMinute)
+      ) {
+        return null;
+      }
+      if (window.startMinute === window.endMinute) {
+        return "24 hours";
+      }
+      return `${formatMinuteLabel(window.startMinute)} to ${formatMinuteLabel(window.endMinute)}`;
+    })
+    .filter(Boolean)
+    .join(", ");
+}
+
 function normalizeScheduleRow(rawRow) {
   const normalized = {};
   for (const [key, value] of Object.entries(rawRow || {})) {
@@ -370,6 +422,12 @@ function normalizeScheduleRow(rawRow) {
   if (!sourceElementKey) {
     return null;
   }
+
+  const paidTimeStartMinute = toNumber(
+    get("paid_time_start_minute", "paidtimestartminute")
+  );
+  const paidTimeEndMinute = toNumber(get("paid_time_end_minute", "paidtimeendminute"));
+  const is24hPaid = toBoolean(get("is_24h", "is24h", "is_24_hour", "is24hour"));
 
   const dayWindows = (dayName) => {
     const day = dayName.toLowerCase();
@@ -394,6 +452,16 @@ function normalizeScheduleRow(rawRow) {
     const genericEnd = parseTimeToMinutes(get(`${day}end`));
     if (genericStart !== null && genericEnd !== null) {
       windows.push({ startMinute: genericStart, endMinute: genericEnd });
+    }
+
+    if (!windows.length && paidTimeStartMinute !== null && paidTimeEndMinute !== null) {
+      const startMinute = Math.max(0, Math.min(24 * 60, Math.round(paidTimeStartMinute)));
+      const endMinute = Math.max(0, Math.min(24 * 60, Math.round(paidTimeEndMinute)));
+
+      // Equal minute bounds should only be treated as 24h paid when explicitly flagged.
+      if (startMinute !== endMinute || is24hPaid === true) {
+        windows.push({ startMinute, endMinute });
+      }
     }
 
     return windows;
@@ -451,6 +519,9 @@ function parseScheduleRows(rawText, filePath) {
     }
     if (Array.isArray(parsed.data)) {
       return parsed.data;
+    }
+    if (parsed && parsed.locations && typeof parsed.locations === "object") {
+      return Object.values(parsed.locations);
     }
     return [];
   }
@@ -515,6 +586,7 @@ function evaluateScheduleFreeStatus(sourceElementKey, observedAtMs) {
       known: false,
       isFree: false,
       reason: "Schedule unavailable for this blockface",
+      chargingPeriod: "Unknown",
     };
   }
 
@@ -525,6 +597,7 @@ function evaluateScheduleFreeStatus(sourceElementKey, observedAtMs) {
       known: false,
       isFree: false,
       reason: "No valid schedule record",
+      chargingPeriod: "Unknown",
     };
   }
 
@@ -540,6 +613,7 @@ function evaluateScheduleFreeStatus(sourceElementKey, observedAtMs) {
       known: true,
       isFree: true,
       reason: `Outside paid schedule (${time.weekday})`,
+      chargingPeriod: formatChargingPeriod(windows),
     };
   }
 
@@ -553,6 +627,7 @@ function evaluateScheduleFreeStatus(sourceElementKey, observedAtMs) {
     reason: inPaidWindow
       ? `Inside paid schedule (${time.weekday})`
       : `Outside paid schedule (${time.weekday})`,
+    chargingPeriod: formatChargingPeriod(windows),
   };
 }
 
@@ -580,26 +655,52 @@ function normalizeText(value) {
     .trim();
 }
 
+function readField(row, keys) {
+  for (const key of keys) {
+    if (!Object.prototype.hasOwnProperty.call(row, key)) {
+      continue;
+    }
+    const value = row[key];
+    if (value === null || value === undefined) {
+      continue;
+    }
+    if (typeof value === "string" && !value.trim()) {
+      continue;
+    }
+    return value;
+  }
+  return null;
+}
+
 function normalizeRow(row) {
-  const occupied = toNumber(row.paidoccupancy);
-  const total = toNumber(row.parkingspacecount);
-  const ts = parseTimestamp(row.occupancydatetime);
+  const paidOccupancyRaw = readField(row, ["paidoccupancy", "occupied_spaces", "occupiedspaces"]);
+  const parkingSpaceCountRaw = readField(row, [
+    "parkingspacecount",
+    "total_spaces",
+    "totalspaces",
+    "spot_count",
+  ]);
+  const occupied = toNumber(paidOccupancyRaw);
+  const total = toNumber(parkingSpaceCountRaw);
+  const observedAtRaw = readField(row, ["occupancydatetime", "observed_at", "bucketstartdatetime"]);
+  const bucketStartRaw = readField(row, ["bucketstartdatetime", "bucket_start_datetime"]);
+  const ts = parseTimestamp(observedAtRaw);
   const coords = row?.location?.coordinates;
+  const lon = toNumber(coords?.[0] ?? readField(row, ["longitude", "lon"]));
+  const lat = toNumber(coords?.[1] ?? readField(row, ["latitude", "lat"]));
 
   if (
     occupied === null ||
     total === null ||
     total <= 0 ||
     !ts ||
-    !Array.isArray(coords) ||
-    coords.length < 2
+    lon === null ||
+    lat === null ||
+    lat < -90 ||
+    lat > 90 ||
+    lon < -180 ||
+    lon > 180
   ) {
-    return null;
-  }
-
-  const lon = toNumber(coords[0]);
-  const lat = toNumber(coords[1]);
-  if (lon === null || lat === null) {
     return null;
   }
 
@@ -607,22 +708,37 @@ function normalizeRow(row) {
   const available = Math.max(total - clampedOccupied, 0);
   const occupancyPct = (clampedOccupied / total) * 100;
   const availabilityPct = 100 - occupancyPct;
-  const sourceElementKey = row.sourceelementkey || `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  const sourceElementKey =
+    readField(row, ["sourceelementkey", "source_element_key", "element_key"]) ||
+    `${lat.toFixed(5)},${lon.toFixed(5)}`;
+  const parkingCategory = readField(row, ["parkingcategory", "parking_category"]) || "Unknown";
   const scheduleStatus = evaluateScheduleFreeStatus(sourceElementKey, ts);
   const explicitFree = isExplicitFreeRow(row);
+  const explicitNoData = isExplicitNoDataRow(row);
 
   return {
     sourceElementKey,
-    blockfaceName: row.blockfacename || "Unknown blockface",
-    sideOfStreet: row.sideofstreet || "",
-    paidParkingArea: row.paidparkingarea || "Unknown",
-    paidParkingSubarea: row.paidparkingsubarea || "",
-    parkingCategory: row.parkingcategory || "Unknown",
+    blockfaceName: readField(row, ["blockfacename", "blockface_name"]) || "Unknown blockface",
+    sideOfStreet: readField(row, ["sideofstreet", "side_of_street"]) || "",
+    paidParkingArea:
+      readField(row, ["paidparkingarea", "paid_parking_area", "area_name"]) || "Unknown",
+    paidParkingSubarea:
+      readField(row, ["paidparkingsubarea", "paid_parking_subarea", "subarea_name"]) || "",
+    parkingCategory,
     isFree: explicitFree || scheduleStatus.isFree,
-    freeReason: explicitFree ? "Marked free in source data" : scheduleStatus.reason,
+    freeReason: explicitFree
+      ? "Marked free in source data"
+      : scheduleStatus.reason,
+    chargingPeriod: scheduleStatus.chargingPeriod || "Unknown",
+    isExplicitNoData: explicitNoData,
     scheduleKnown: scheduleStatus.known,
     observedAtMs: ts,
-    observedAtRaw: row.occupancydatetime,
+    observedAtRaw,
+    bucketStartRaw,
+    parkingTimeLimitCategory:
+      readField(row, ["parkingtimelimitcategory", "parking_time_limit_category"]) || "",
+    paidOccupancyRaw,
+    parkingSpaceCountRaw,
     occupiedSpaces: clampedOccupied,
     totalSpaces: total,
     availableSpaces: available,
@@ -665,8 +781,8 @@ function normalizeBucketedRow(row) {
   };
 }
 
-function parseRowsFromText(rawText) {
-  if (DATA_FILE.endsWith(".ndjson")) {
+function parseRowsFromText(rawText, filePath) {
+  if (filePath.endsWith(".ndjson")) {
     return rawText
       .split(/\r?\n/)
       .map((line) => line.trim())
@@ -818,12 +934,11 @@ function initTimeRangeFromValues(values) {
 
   timeRange.min = "0";
   timeRange.max = "47";
-  // Default to latest available bucket within the day.
-  const latestIdx = Math.min(
+  const defaultIdx = Math.min(
     47,
-    Math.max(0, Math.floor((latest - sliderDayStartMs) / BUCKET_MS_SIZE))
+    Math.max(0, Math.floor(DEFAULT_TIME_MINUTE_OF_DAY / (BUCKET_MS_SIZE / (60 * 1000))))
   );
-  timeRange.value = String(latestIdx);
+  timeRange.value = String(defaultIdx);
   timeRange.disabled = timeValues.length <= 1;
   updateTimeRangeLabel();
 }
@@ -853,22 +968,6 @@ function filteredPoints() {
   return points;
 }
 
-function updateStats(points) {
-  statBlockfaces.textContent = points.length.toLocaleString();
-
-  if (!points.length) {
-    statAvgOcc.textContent = "-";
-    statAvgAvail.textContent = "-";
-    return;
-  }
-
-  const occAvg = points.reduce((sum, p) => sum + p.occupancyPct, 0) / points.length;
-  const availAvg = points.reduce((sum, p) => sum + p.availabilityPct, 0) / points.length;
-
-  statAvgOcc.textContent = `${occAvg.toFixed(1)}%`;
-  statAvgAvail.textContent = `${availAvg.toFixed(1)}%`;
-}
-
 function zoomToArea(areaValue) {
   const targetArea = String(areaValue || "").trim();
   if (!targetArea || targetArea === "all") {
@@ -893,7 +992,7 @@ function render(options = {}) {
   updateTimeRangeLabel();
   const points = filteredPoints();
   markerLayer.clearLayers();
-  updateStats(points);
+  setVisibleBlockfaceCount(points.length);
 
   if (!points.length) {
     setStatus("No blockfaces match the current filters.");
@@ -914,52 +1013,29 @@ function render(options = {}) {
   }
 
   for (const point of points) {
-    const noData = isNoDataPoint(point);
-    const paymentStatus = noData
-      ? "NO DATA"
-      : point.isFree
-        ? "Free (outside paid time)"
-        : hasActivePaymentTransaction(point)
-          ? "PAID (active payment transaction)"
-          : "NO PAID TRANSACTION";
+    const marker = L.circleMarker([point.latitude, point.longitude], {
+      radius: 7,
+      fillColor: markerColorForPoint(point),
+      color: "#ffffff",
+      weight: 1,
+      fillOpacity: 0.92,
+    });
 
-    const marker = noData
-      ? L.circleMarker([point.latitude, point.longitude], {
-          radius: 7,
-          fillColor: "#ffffff",
-          color: "#5f6a6a",
-          weight: 1,
-          fillOpacity: 1,
-        })
-      : point.isFree
-        ? L.marker([point.latitude, point.longitude], { icon: freeIcon })
-        : L.circleMarker([point.latitude, point.longitude], {
-            radius: 7,
-            fillColor: markerColorForPoint(point),
-            color: "#ffffff",
-            weight: 1,
-            fillOpacity: 0.92,
-          });
+    const bucketStartLabel = point.bucketStartRaw || formatLocalTime(point.bucketStartMs);
 
     marker.bindPopup(`
       <div class="popup-title">${escapeHtml(point.blockfaceName)}</div>
-      <div>Observed: ${formatLocalTime(point.observedAtMs)}</div>
-      <div>30-min Bucket Start: ${formatLocalTime(point.bucketStartMs)}</div>
-      <div>Side: ${escapeHtml(point.sideOfStreet || "Unknown")}</div>
-      <div>Area: ${escapeHtml(point.paidParkingArea)}${point.paidParkingSubarea ? ` (${escapeHtml(point.paidParkingSubarea)})` : ""}</div>
-      <div>Category: ${escapeHtml(point.parkingCategory)}</div>
-      <div>Payment Status: ${paymentStatus}</div>
-      <div>Paid-Time Rule: ${escapeHtml(point.freeReason || "Unknown")}</div>
-      <div>Occupied: ${point.occupiedSpaces}</div>
-      <div>Total Spaces: ${point.totalSpaces}</div>
-      <div>Available Spaces: ${point.availableSpaces}</div>
-      <div>Occupancy: ${point.occupancyPct.toFixed(1)}%</div>
-      <div>Availability: ${point.availabilityPct.toFixed(1)}%</div>
-      <div>Minute Occ Avg: ${point.minuteStats.occupiedAvg.toFixed(1)}</div>
-      <div>Minute Occ Min/Max: ${point.minuteStats.occupiedMin} / ${point.minuteStats.occupiedMax}</div>
-      <div>Minute Occ First/Last: ${point.minuteStats.occupiedFirst} / ${point.minuteStats.occupiedLast}</div>
-      <div>Minute Occ Delta: ${point.minuteStats.occupiedDelta >= 0 ? "+" : ""}${point.minuteStats.occupiedDelta}</div>
-      <div>Minute Coverage: ${point.minuteStats.coverageMinutes} samples</div>
+      <div>Source Element Key: ${escapeHtml(point.sourceElementKey || "Unknown")}</div>
+      <div>Occupancy Datetime: ${escapeHtml(point.observedAtRaw || "Unknown")}</div>
+      <div>Bucket Start Datetime: ${escapeHtml(bucketStartLabel || "Unknown")}</div>
+      <div>Side of Street: ${escapeHtml(point.sideOfStreet || "Unknown")}</div>
+      <div>Paid Parking Area: ${escapeHtml(point.paidParkingArea || "Unknown")}</div>
+      <div>Paid Parking Subarea: ${escapeHtml(point.paidParkingSubarea || "Unknown")}</div>
+      <div>Parking Category: ${escapeHtml(point.parkingCategory || "Unknown")}</div>
+      <div>Parking Time Limit Category: ${escapeHtml(point.parkingTimeLimitCategory || "Unknown")}</div>
+      <div>Paid Occupancy: ${escapeHtml(point.paidOccupancyRaw || "Unknown")}</div>
+      <div>Parking Space Count: ${escapeHtml(point.parkingSpaceCountRaw || "Unknown")}</div>
+      <div>Coordinates: [${point.longitude.toFixed(8)}, ${point.latitude.toFixed(8)}]</div>
     `);
 
     marker.addTo(markerLayer);
@@ -971,22 +1047,13 @@ function render(options = {}) {
   setStatus(`Showing ${points.length.toLocaleString()} blockfaces.${scheduleNote}`);
 }
 
-function updateWindowStat() {
-  if (!timeValues.length || sliderDayStartMs === null) {
-    statWindow.textContent = "-";
-    return;
-  }
-
-  const dayEnd = sliderDayStartMs + (24 * 60 * 60 * 1000) - 1000;
-  statWindow.textContent = `${new Date(sliderDayStartMs).toLocaleTimeString()} - ${new Date(dayEnd).toLocaleTimeString()}`;
-}
-
 async function loadSelectedChunkTime(options = {}) {
   const shouldFitMap = options.fitMap ?? false;
   const selected = selectedTimeEntry();
 
   if (!selected || !selected.file) {
     bucketRows = [];
+    setDataSourceLabel("-");
     render({ fitMap: false });
     return;
   }
@@ -995,6 +1062,8 @@ async function loadSelectedChunkTime(options = {}) {
     activeChunkFetch.abort();
   }
   activeChunkFetch = new AbortController();
+  activeDataFile = selected.file;
+  setDataSourceLabel(activeDataFile);
 
   setStatus(`Loading ${new Date(selected.bucketStartMs).toLocaleString()}...`);
 
@@ -1019,9 +1088,7 @@ async function loadSelectedChunkTime(options = {}) {
       return;
     }
     markerLayer.clearLayers();
-    statBlockfaces.textContent = "-";
-    statAvgOcc.textContent = "-";
-    statAvgAvail.textContent = "-";
+    setVisibleBlockfaceCount(null);
     setStatus(`Error: ${err.message}`);
   } finally {
     activeChunkFetch = null;
@@ -1029,19 +1096,104 @@ async function loadSelectedChunkTime(options = {}) {
 }
 
 async function loadChunkIndex() {
+  for (const filePath of CHUNK_INDEX_FILES) {
+    try {
+      const res = await fetch(filePath, { cache: "no-store" });
+      if (!res.ok) {
+        continue;
+      }
+
+      const indexJson = await res.json();
+      const rawEntries = Array.isArray(indexJson)
+        ? indexJson
+        : indexJson?.entries || indexJson?.buckets || indexJson?.times || [];
+      if (!Array.isArray(rawEntries) || !rawEntries.length) {
+        continue;
+      }
+
+      const normalizedEntries = rawEntries
+        .map((entry) => {
+          const bucketRaw =
+            entry?.bucketStartMs ??
+            entry?.bucket_start_ms ??
+            entry?.bucketstartms ??
+            entry?.bucketStart ??
+            entry?.bucket_start ??
+            entry?.bucketstartdatetime ??
+            entry?.time ??
+            entry?.timestamp;
+          const bucketStartMs =
+            typeof bucketRaw === "number" ? bucketRaw : parseTimestamp(bucketRaw);
+
+          const file =
+            entry?.file || entry?.path || entry?.url || entry?.chunkFile || entry?.chunk_file;
+          if (!Number.isFinite(bucketStartMs) || !file) {
+            return null;
+          }
+
+          return {
+            bucketStartMs,
+            file: String(file),
+          };
+        })
+        .filter(Boolean)
+        .sort((a, b) => a.bucketStartMs - b.bucketStartMs);
+
+      if (!normalizedEntries.length) {
+        continue;
+      }
+
+      const dayStartRaw =
+        indexJson?.sliderDayStartMs || indexJson?.slider_day_start_ms || indexJson?.dayStartMs;
+      const parsedDayStart =
+        typeof dayStartRaw === "number" ? dayStartRaw : parseTimestamp(dayStartRaw);
+      sliderDayStartMs = Number.isFinite(parsedDayStart) ? parsedDayStart : null;
+
+      timeEntries = normalizedEntries;
+      useChunkMode = true;
+      activeDataFile = filePath;
+
+      initTimeRangeFromValues(normalizedEntries.map((entry) => entry.bucketStartMs));
+      await loadSelectedChunkTime({ fitMap: false });
+      return true;
+    } catch (_err) {
+      // Try next index file.
+    }
+  }
+
+  timeEntries = [];
+  useChunkMode = false;
   return false;
 }
 
 async function loadSingleFileData() {
-  const res = await fetch(DATA_FILE, { cache: "no-store" });
-  if (!res.ok) {
-    throw new Error(`Could not load ${DATA_FILE} (${res.status}). Run a local web server.`);
+  let rawRows = null;
+
+  for (const filePath of DATA_FILES) {
+    try {
+      const res = await fetch(filePath, { cache: "no-store" });
+      if (!res.ok) {
+        continue;
+      }
+
+      const rawText = await res.text();
+      const parsedRows = parseRowsFromText(rawText, filePath);
+      if (!Array.isArray(parsedRows) || !parsedRows.length) {
+        continue;
+      }
+
+      rawRows = parsedRows;
+      activeDataFile = filePath;
+      break;
+    } catch (_err) {
+      // Try the next candidate file.
+    }
   }
 
-  const rawText = await res.text();
-  const rawRows = parseRowsFromText(rawText);
-  if (!Array.isArray(rawRows) || !rawRows.length) {
-    throw new Error("Local file is empty or invalid.");
+  if (!rawRows) {
+    throw new Error(
+      `Could not load a local dataset. Tried: ${DATA_FILES.join(", ")}. Run a local web server.`
+    );
   }
 
   if (rawRows[0].minute_stats && rawRows[0].bucketstartdatetime) {
@@ -1058,16 +1210,18 @@ async function loadSingleFileData() {
     throw new Error("No valid 30-minute rows were produced.");
   }
 
+  setDataSourceLabel(activeDataFile);
+
   timeEntries = [];
   useChunkMode = false;
   initTimeRangeFromValues(bucketRows.map((row) => row.bucketStartMs));
-  updateWindowStat();
-  render({ fitMap: true });
+  render({ fitMap: false });
 }
 
 async function loadLocalData() {
   setStatus("Loading data...");
-  refreshBtn.disabled = true;
+  setVisibleBlockfaceCount(null);
+  setDataSourceLabel(activeDataFile);
 
   try {
     await loadBlockfaceScheduleData();
@@ -1079,17 +1233,19 @@ async function loadLocalData() {
     render({ fitMap: false });
   } catch (err) {
     markerLayer.clearLayers();
-    statBlockfaces.textContent = "-";
-    statAvgOcc.textContent = "-";
-    statAvgAvail.textContent = "-";
-    statWindow.textContent = "-";
+    setVisibleBlockfaceCount(null);
     setStatus(`Error: ${err.message}`);
-  } finally {
-    refreshBtn.disabled = false;
   }
 }
 
 addressSearch.addEventListener("input", () => render({ fitMap: false }));
+addressSearch.addEventListener("keydown", (event) => {
+  if (event.key !== "Enter") {
+    return;
+  }
+  event.preventDefault();
+  render({ fitMap: true });
+});
 clearSearchBtn.addEventListener("click", () => {
   addressSearch.value = "";
   render({ fitMap: true });
@@ -1108,6 +1264,5 @@ paidAreaSelect.addEventListener("change", () => {
   render({ fitMap: !didZoom });
 });
 map.on("zoomend", () => render({ fitMap: false }));
-refreshBtn.addEventListener("click", loadLocalData);
 
 loadLocalData();

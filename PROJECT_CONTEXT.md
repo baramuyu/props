@@ -4,7 +4,7 @@
 Build a Seattle parking availability mapping system using Seattle public occupancy data, starting with dataset `hiyf-7edq`.
 
 ## Current Starting Point
-- Local source file: `data/hiyf-7edq-latest-60-min.json`
+- Local source file: `data/hiyf-7edq-latest-24h-30min-with-stats.ndjson`
 - Initial mode: read local file, normalize records, render map availability
 - Future mode: periodic ingestion from Seattle Open Data API
 
@@ -19,7 +19,11 @@ Build a Seattle parking availability mapping system using Seattle public occupan
 - Load and parse local JSON snapshot
 - Normalize to canonical observation schema
 - Compute occupancy and availability metrics
-- Render map with color-coded availability
+- Render map with color-coded availability using 3 primary states:
+  - Available (green)
+  - Tight (amber)
+  - Full (red)
+  - Free (gray, smaller dot)
 - Basic filters (min availability, area)
 
 ### Phase 2
@@ -87,7 +91,7 @@ Store app-facing records as `parking_observations`:
 - `src/ui/` map application
 
 ## Milestones
-1. Local-file MVP working from `data/hiyf-7edq-latest-60-min.json`
+1. Local-file MVP working from `data/hiyf-7edq-latest-24h-30min-with-stats.ndjson`
 2. Add automated fetcher and append-only raw archive
 3. Add normalized store + dedup
 4. Add trend analytics and deploy
@@ -96,3 +100,16 @@ Store app-facing records as `parking_observations`:
 - Citywide traffic prediction
 - Complex demand forecasting models
 - Payment transaction integration
+
+## MVP UI Change Log
+- Moved MVP/local-file labeling to the bottom of the control panel with:
+  - visible blockface count (current filtered view)
+  - datasource path (current load path: single-file mode path or selected chunk file path)
+- Removed `Reload Local Data` button.
+- Removed panel stats rows:
+  - Visible Blockfaces
+  - Average Occupancy
+  - Average Availability
+  - Data Time Window
+- Removed Free and No Data legend entries and marker-state rendering.
+- Popup now shows source-only fields from the local NDJSON rows (friendly labels), excluding derived/schedule fields and `minute_stats`.
